@@ -35,13 +35,21 @@ This is **V1** by design.
 
 ## Project Structure
 
-├── api # Submission API
-├── core # Core domain types
-├── payload # Task payload implementations
-├── recovery # Crash recovery logic
-├── scheduler # Scheduler & registry
-├── store # Append-only task store
-└── App.java # Entry point
+.
+├── src
+│ └── main
+│ └── java
+│ └── com
+│ └── example
+│ ├── api # Submission API
+│ ├── core # Core domain types
+│ ├── payload # Task payload implementations
+│ ├── recovery # Crash recovery logic
+│ ├── scheduler # Scheduler & registry
+│ ├── store # Append-only task store
+│ └── App.java # Entry point
+├── pom.xml # Maven configuration
+└── README.md
 
 ---
 
