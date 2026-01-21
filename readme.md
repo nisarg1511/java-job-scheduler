@@ -35,7 +35,7 @@ This is **V1** by design.
 
 ## Project Structure
 
-.
+```
 ├── src
 │ └── main
 │ └── java
@@ -50,6 +50,7 @@ This is **V1** by design.
 │ └── App.java # Entry point
 ├── pom.xml # Maven configuration
 └── README.md
+```
 
 ---
 
