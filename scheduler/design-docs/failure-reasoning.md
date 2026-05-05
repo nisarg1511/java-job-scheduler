@@ -1,22 +1,35 @@
-#Failure Modes
+# Failure Reasoning Notes
 
-1. What if **the process crashes while writing to disk**?
-   > |If the process crashes while executing, all in-memory state is lost. On restart, the system relies on persisted logs or metadata to determine the last consistent state. Tasks that were not durably marked as completed may be re-executed safely. The system does not attempt to resume execution mid-task, but instead recovers at well-defined boundaries.
-2. What if **a task is executed twice**?
-   > |The scheduler does not attempt to prevent duplicate task execution. Instead, tasks are designed to be idempotent, ensuring that re-execution produces the same final state. This avoids complex coordination while remaining robust to crashes and retries.
-3. What if **the scheduler crashes after assigning a task but before recording it**?
-   > |If the system crashes during a disk write, any partially written state must be treated as invalid. The system must assume the write did not succeed. To handle this safely, writes should be designed to be atomic, so that after a crash the system sees either the old state or the fully written new state. Tasks whose completion was not durably recorded are treated as failed and may be safely re-executed.
-4. What if **the scheduler crashes after starting a task, but before persisting that the task is RUNNING**?
-   > |The scheduler and task execution are co-located within the same process. A scheduler crash terminates all in-flight tasks. Therefore, if a crash occurs before task state is durably recorded, the task is treated as not executed and may be safely retried on restart.
-5. What if **the task completes successfully, but the scheduler crashes before persisting COMPLETED**?
-   > |A task is considered completed only when its effects have been durably applied. If a task completes execution but the scheduler crashes before persisting the COMPLETED state, the task will be retried on restart. Therefore, tasks must be designed with idempotent effects so that re-execution does not violate system correctness.
+These notes explain the reasoning behind the scheduler's conservative recovery behavior.
 
-#How does the scheduler handles and addresses different kind of failures:
-| Scenario | Behavior |
-| ---------------------- | ----------------------- |
-| Scheduler crash | All tasks stop |
-| Crash before RUNNING | Task retried |
-| Crash during execution | Task retried |
-| Crash before COMPLETED | Task retried |
-| Duplicate execution | Safe due to idempotency |
-| Partial disk write | Treated as failure |
+## What if the process crashes while writing to disk?
+
+The final log record may be incomplete. During recovery, `FileTaskStore` reads records sequentially and stops when it sees malformed data. It then truncates the log back to the last known-good byte offset.
+
+Result: valid earlier records are preserved, and the partial transition is treated as if it did not happen.
+
+## What if a task is executed twice?
+
+The scheduler provides at-least-once execution, so duplicate execution is possible after some crash windows. Payloads should therefore be idempotent.
+
+Examples of idempotent approaches include using a stable operation ID, checking whether an output already exists, or making the external side effect naturally repeat-safe.
+
+## What if the scheduler crashes after accepting a task?
+
+If the `PENDING` record was flushed successfully, recovery will find the task and make it eligible for execution.
+
+If the process died before the `PENDING` record was durable, the task was not safely accepted.
+
+## What if the task completes but the scheduler crashes before recording `COMPLETED`?
+
+The task will be retried because recovery has no durable proof of completion. This avoids losing work, but it means task side effects must tolerate repetition.
+
+## Summary Table
+
+| Question | Conservative answer |
+| --- | --- |
+| Is a task lost after durable submission? | It should be recovered from the log. |
+| Can a task run twice? | Yes, after certain crashes. |
+| Are completed tasks retried? | Not if a valid `COMPLETED` record exists. |
+| Is exactly-once execution provided? | No. |
+| What makes retries safe? | Idempotent payload effects. |

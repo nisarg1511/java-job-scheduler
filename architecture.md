@@ -1,60 +1,64 @@
 # Architecture Overview
 
-The scheduler is built around a **single source of truth**: an append-only log.
+The scheduler is organized around one central idea: durable task state lives in an append-only log, while runtime state is reconstructed from that log whenever the scheduler starts.
 
-All in-memory state is derived from this log.
+## System Boundary
 
----
+This is a single-node scheduler. Task submission, task execution, recovery, and persistence all run in one JVM process. There are no remote workers, distributed locks, or external databases in the current version.
 
 ## Core Components
 
-### TaskStore
-
-- Durable, append-only storage
-- One record per line (newline-delimited JSON)
-- No mutation, no deletion
-
-### TaskRegistry
-
-- In-memory mapping of `taskId → TaskPayload`
-- Non-persistent
-- Rebuilt via recovery
-
-### RecoveryManager
-
-- Reads the log
-- Reconstructs the latest state per task
-- Determines which tasks are pending
-
-### Scheduler
-
-- Executes pending tasks
-- Persists state transitions
-- Stateless across restarts
-
----
+| Component | Package | Responsibility |
+| --- | --- | --- |
+| Submission API | `com.scheduler.api` | Accepts task IDs and payloads, rejects duplicate IDs, and persists new pending tasks. |
+| Domain model | `com.scheduler.core` | Defines task identifiers, task states, task types, and executable payloads. |
+| Task registry | `com.scheduler.scheduler` | Holds in-memory mappings from task ID to executable payload for the current process. |
+| Scheduler | `com.scheduler.scheduler` | Recovers state, selects pending tasks, executes payloads, and records completion. |
+| Recovery manager | `com.scheduler.recovery` | Replays the durable log and derives pending/completed task sets. |
+| File task store | `com.scheduler.store` | Appends JSON-lines task records, flushes writes to disk, and truncates corrupted trailing records during recovery. |
 
 ## Data Flow
 
-Submit Task
-↓
-Append PENDING record
-↓
-In-memory registry updated
-↓
-Crash? → Recovery reads log
-↓
-Scheduler executes pending tasks
-↓
-Append COMPLETED record
+```text
+submit(taskId, payload)
+        |
+        v
+register payload in memory
+        |
+        v
+append PENDING record to task-log.txt
+        |
+        v
+run scheduler
+        |
+        v
+replay log to recover latest task states
+        |
+        v
+execute pending payloads
+        |
+        v
+append COMPLETED records
+```
 
----
+## Source Of Truth
 
-## Persistence Model
+The append-only log is the durable source of truth for task state. In-memory structures are caches derived from the log and can be discarded at any time.
 
-- **Log-only**
-- No snapshots
-- No checkpoints
-- Recovery always replays from the beginning
+## Recovery Model
 
-This trades performance for correctness and simplicity.
+Recovery is deterministic:
+
+1. Read records from the log in order.
+2. Stop if a corrupted or partial record is encountered.
+3. Truncate the log to the last known-good byte position.
+4. Build the latest known state for each task ID.
+5. Return pending tasks for execution and completed task IDs for exclusion.
+
+## Execution Model
+
+Execution is single-threaded. The scheduler loops through recovered pending task IDs, looks up the payload in the registry, executes it, and appends a completion record after successful execution.
+
+## Architectural Trade-Off
+
+The implementation favors explicitness over scale. A production-grade scheduler would eventually need payload serialization, richer failure records, retry policies, concurrency, observability, and compaction. This project intentionally keeps the first version small so that correctness and failure behavior remain inspectable.

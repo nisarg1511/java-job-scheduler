@@ -2,191 +2,68 @@
 
 ## Overview
 
-The scheduler is a **single-threaded, crash-safe task executor** built on top of an **append-only persistent log**.
-Its primary responsibility is to **execute tasks reliably** while guaranteeing **correct recovery after crashes**.
+The scheduler is a single-threaded, file-backed job runner. It is designed to demonstrate the core mechanics of durable background processing without hiding them behind a framework.
 
-## The scheduler prioritizes **correctness, determinism, and recoverability** over throughput or parallelism.
+The implementation prioritizes correctness, deterministic recovery, and readable failure semantics over throughput.
 
-## Core Principles
+## Current Task Lifecycle
 
-1. **Persistence-first design**
-   The append-only task log is the **only source of truth**.
-
-2. **At-least-once execution**
-   Tasks may execute multiple times, but their effects must be idempotent.
-
-3. **Crash safety through replay**
-   All in-memory state is reconstructible by replaying the log.
-
-4. **Single-threaded execution**
-   Tasks are executed one at a time to simplify reasoning and ensure correctness.
-
----
-
-## Task Lifecycle
-
-A task transitions through the following states:
-
-```
-PENDING  ──────▶  COMPLETED
-   ▲                │
-   └──── crash ─────┘
+```text
+PENDING -> COMPLETED
 ```
 
-- `PENDING`
-  The task is eligible for execution.
-- `COMPLETED`
-  The task’s effects have been fully realized and persisted.
+- `PENDING`: the task has been accepted and durably recorded.
+- `COMPLETED`: the task executed successfully and completion was durably recorded.
 
-### Notes
-
-- `RUNNING` is **not persisted**.
-- Any task that was running during a crash is treated as `PENDING` on restart.
-- `COMPLETED` is a **terminal state**.
-
----
-
-## Failure Model
-
-The scheduler assumes the following failure modes:
-
-- Process crash
-- Partial disk writes
-- Power loss
-- Task execution exceptions
-
-### Guarantees
-
-- A task is never marked `COMPLETED` unless its effects are fully applied.
-- Partial or corrupted log entries are discarded during recovery.
-- No task is lost due to a crash.
-
----
+There is no durable `RUNNING` state in the current implementation. If the process crashes while a task is executing, the task has no completion record and is retried on the next run.
 
 ## Scheduler Phases
 
-### Phase 0 — Bootstrap
+### 1. Submission
 
-Initializes core components:
+`TaskSubmissionService` receives a client-provided task ID and `TaskPayload`. It checks the log for duplicate IDs, registers the payload in memory, and appends a `PENDING` record.
 
-- TaskStore
-- RecoveryManager
-- TaskExecutor
+### 2. Recovery
 
-No task execution occurs in this phase.
+Before execution, the scheduler invokes `RecoveryManager`. Recovery replays the append-only log and derives the latest known state for each task ID.
 
----
+### 3. Selection
 
-### Phase 1 — Recovery
+Pending task IDs are returned in replay order. The scheduler processes them one by one.
 
-On startup, the scheduler reconstructs state by replaying the task log.
+### 4. Execution
 
-**Responsibilities**
+For each pending task ID, the scheduler looks up the payload from `TaskRegistry` and calls `payload.execute()`.
 
-- Load all task records from the log
-- Rebuild the final state for each task
-- Produce:
-  - Ordered list of pending tasks
-  - Set of completed tasks
+### 5. Commit
 
-**Outcome**
+If execution succeeds, the scheduler appends a `COMPLETED` record through `TaskStore`.
 
-- In-memory state accurately reflects the last durable system state.
+## Failure Semantics
 
----
+| Failure point | Result |
+| --- | --- |
+| Before durable submission | Task is not recovered because it was never durably accepted. |
+| After durable submission | Task is recovered as pending. |
+| During payload execution | Task can be retried. |
+| After payload execution but before completion append | Task can be retried. |
+| During completion append | Recovery keeps valid records and truncates malformed trailing data. |
 
-### Phase 2 — Selection
+## Guarantees
 
-The scheduler selects the next task to execute:
+- The scheduler can rebuild task state from the log.
+- Completed tasks are not selected again after a valid `COMPLETED` record exists.
+- Pending tasks remain eligible until completion is durably recorded.
+- Recovery is deterministic for a given valid log prefix.
 
-- Tasks are selected **in creation order**
-- Only tasks in `PENDING` state are considered
+## Non-Goals
 
----
+- Exactly-once execution.
+- Parallel execution.
+- Delayed scheduling.
+- Durable payload reconstruction.
+- Distributed coordination.
 
-### Phase 3 — Execution
+## Future Extensions
 
-The selected task is executed:
-
-- Task logic runs
-- Side effects are applied
-
-**Important**
-
-- No state is persisted during execution
-- Any failure leaves the task in `PENDING`
-
----
-
-### Phase 4 — Commit
-
-Once task effects are successfully realized:
-
-- A `COMPLETED` record is appended to the log
-- The write is forced to disk
-
-This marks the task as terminal.
-
----
-
-### Phase 5 — Loop Continuation
-
-- The completed task is removed from the pending list
-- The scheduler proceeds to the next task
-
----
-
-## Crash Semantics
-
-The scheduler may crash at any point.
-
-On restart:
-
-- All in-memory state is discarded
-- Recovery replays the log
-- Tasks not marked `COMPLETED` are retried
-
-This ensures **deterministic recovery** and **no data loss**.
-
----
-
-## Determinism Guarantee
-
-Given the same log:
-
-- Recovery produces the same in-memory state
-- Tasks are executed in the same order
-- Scheduler behavior is reproducible
-
----
-
-## Design Trade-offs
-
-### Why single-threaded?
-
-- Simplifies reasoning
-- Avoids concurrency-related failure modes
-- Keeps invariants clear and enforceable
-
-### Why no `RUNNING` persistence?
-
-- `RUNNING` is transient
-- Tasks running during a crash are retried anyway
-- Persistence is reserved for durable state only
-
----
-
-## Summary
-
-The scheduler is best understood as:
-
-> **A deterministic interpreter of an append-only task log that guarantees correct execution and recovery.**
-
-This design forms a strong foundation for future extensions such as:
-
-- Concurrency
-- Retries with backoff
-- Dead-letter queues
-- Distributed execution
-
----
+The current design leaves room for retries with backoff, failure states, payload serialization, worker pools, log compaction, and eventually a durable `RUNNING` or lease state for concurrent execution.

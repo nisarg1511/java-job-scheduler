@@ -1,136 +1,60 @@
 # On-Disk Persistence Model
 
-This document defines how the Scheduler persists task state to disk in a **crash-safe, minimal, file-based** manner.
+The current scheduler uses a single append-only JSON-lines file as its durable store.
 
-The persistence model is designed to:
-- Survive process crashes
-- Avoid partial or corrupt writes
-- Support restart recovery
-- Align exactly with `task-state-machine.md` and `failure-modes.md`
+## Location
 
----
-
-## Persistence Principles
-
-- File-based storage (no embedded DB)
-- Atomic writes using **write-then-rename**
-- No in-place mutation of state files
-- Disk state is the **source of truth** on restart
-
----
-
-## Directory Layout
-
-```
-data/
-└── tasks/
-    ├── pending/
-    │   └── <task-id>.json
-    ├── running/
-    │   └── <task-id>.json
-    └── completed/
-        └── <task-id>.json
+```text
+scheduler/data/task-log.txt
 ```
 
-Each task exists in **exactly one directory** at any time.
+The path is created by `FileTaskStore` if it does not already exist.
 
----
+## Record Format
 
-## Task File Format
-
-Each task is stored as a single JSON file.
-
-Example:
+Each line is one serialized `TaskRecord`.
 
 ```json
-{
-  "taskId": "task-123",
-  "state": "PENDING",
-  "createdAt": "2026-01-06T10:15:30Z",
-  "payload": {
-    "type": "EMAIL_SEND",
-    "data": {
-      "to": "user@example.com"
-    }
-  }
-}
+{"taskId":"task-1","state":"PENDING","timestamp":"2026-05-05T10:15:30Z"}
+{"taskId":"task-1","state":"COMPLETED","timestamp":"2026-05-05T10:15:31Z"}
 ```
 
-Notes:
-- `state` is redundant but useful for validation
-- `payload` is opaque to the scheduler
+Fields:
 
----
+| Field | Meaning |
+| --- | --- |
+| `taskId` | Immutable task identity. |
+| `state` | Durable state transition, currently `PENDING` or `COMPLETED`. |
+| `timestamp` | Time when the record was created. |
 
-## Atomic State Transitions
+## Write Path
 
-State transitions are implemented as **file moves**, not edits.
+`FileTaskStore.append()` serializes the record, appends a newline, writes it to the log, and forces the file channel to disk.
 
-### Transition: `PENDING → RUNNING`
+The implementation avoids modifying earlier records during normal operation.
 
-Steps:
-1. Read `pending/<task-id>.json`
-2. Write updated file to temporary path `running/.tmp-<task-id>.json`
-3. `fsync` temp file
-4. Atomically rename to `running/<task-id>.json`
-5. Delete original pending file
+## Read And Recovery Path
 
----
+`FileTaskStore.loadAll()` reads records sequentially. It tracks the byte offset after each successfully parsed record.
 
-### Transition: `RUNNING → COMPLETED`
+If parsing fails because the final record is partial or corrupted, the store truncates the file to the last good offset and returns the valid records.
 
-Steps:
-1. Ensure task effects are applied
-2. Write updated file to `completed/.tmp-<task-id>.json`
-3. `fsync` temp file
-4. Atomically rename to `completed/<task-id>.json`
-5. Delete original running file
+## Why JSON Lines?
 
----
+JSON-lines is simple, inspectable, and easy to replay. It is not the most compact format, but it is a good fit for a small crash-recovery project where readability matters.
 
-## Crash Recovery Logic
+## Trade-Offs
 
-On scheduler startup:
+| Choice | Trade-off |
+| --- | --- |
+| Single log file | Simple replay, but linear recovery cost. |
+| No compaction | Clear history, but unbounded log growth. |
+| JSON records | Easy debugging, but more bytes than binary formats. |
+| State-only persistence | Focused implementation, but payloads are not fully reconstructible yet. |
 
-1. Scan `completed/`
-   - Tasks are terminal and ignored
+## Future Improvements
 
-2. Scan `running/`
-   - All tasks are treated as `PENDING`
-   - Files are moved back to `pending/`
-
-3. Scan `pending/`
-   - Tasks are eligible for execution
-
-This guarantees:
-- No task is lost
-- Tasks may be retried
-- At-least-once execution
-
----
-
-## Handling Partial Writes
-
-- Temporary files (`.tmp-*`) are ignored on startup
-- Only fully renamed files are considered valid
-- Partial writes are treated as failed transitions
-
----
-
-## Invariants
-
-- A task file must exist in exactly one state directory
-- `COMPLETED` tasks are never retried
-- State transitions are atomic
-
----
-
-## Non-Goals
-
-- Efficient querying
-- Concurrent writers
-- Large-scale task volumes
-- Distributed storage
-
-These concerns are deferred to later systems.
-
+- Add snapshots or compaction.
+- Persist payload type and arguments.
+- Store failure records and retry metadata.
+- Add checksums for stronger corruption detection.

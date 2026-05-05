@@ -1,129 +1,41 @@
-# Failure Modes & Recovery Semantics
+# Failure Modes And Recovery Semantics
 
-This document defines the failure assumptions, invariants, and recovery behavior of the **single-node Scheduler**.
-
-The scheduler and task execution are **co-located in the same process**. There are no remote workers. If the scheduler crashes, all in-flight tasks terminate.
-
----
+This document describes how the current single-node scheduler behaves when failures occur.
 
 ## Core Assumptions
 
-- Scheduler and task execution run in the same process
-- File-based persistence (no embedded DB)
-- Tasks may be retried
-- Tasks must be **idempotent**
-- A task is considered **COMPLETED only when its effects are durably applied**
-
----
-
-## Task States
-
-- `PENDING` – Task is known but not started
-- `RUNNING` – Task execution has started
-- `COMPLETED` – Task effects have been applied and durably recorded
-
----
+- The scheduler and task execution run in one JVM process.
+- Persistence uses an append-only JSON-lines file.
+- In-memory task payloads are not durable in V1.
+- Durably submitted tasks should not be lost.
+- Tasks may be retried, so payload effects should be idempotent.
 
 ## Failure Scenarios
 
-### 1. Scheduler Process Crash
+| Scenario | Behavior |
+| --- | --- |
+| Process crashes before `PENDING` is appended | The task was not durably accepted and is not recovered. |
+| Process crashes after `PENDING` is appended | Recovery finds the task and marks it pending. |
+| Process crashes during execution | No completion is recorded, so the task can be retried. |
+| Process crashes after execution but before `COMPLETED` append | The task can be retried, so payloads must be idempotent. |
+| Process crashes during a log write | Recovery truncates the malformed trailing record and replays the valid prefix. |
+| Payload throws an exception | The scheduler does not append `COMPLETED`; the task remains eligible for a later retry. |
 
-**What fails:** Scheduler process terminates unexpectedly
+## What The Scheduler Guarantees
 
-**Possible state:**
+- Replay-based recovery from valid log records.
+- Terminal treatment for tasks with valid `COMPLETED` records.
+- Conservative retry behavior for tasks without durable completion.
+- No in-place mutation of valid historical records.
 
-- In-memory task state is lost
-- Disk state remains
+## What The Scheduler Does Not Guarantee
 
-**Recovery:**
+- Exactly-once execution.
+- Durable reconstruction of arbitrary payload objects after a fresh restart.
+- Retry limits or dead-letter handling.
+- Isolation from non-idempotent side effects.
+- High availability or distributed execution.
 
-- Scheduler restarts
-- Tasks not durably marked as `COMPLETED` are retried
+## Correctness Condition
 
----
-
-### 2. Crash Before Recording `RUNNING`
-
-**What fails:** Scheduler crashes after starting execution but before persisting `RUNNING`
-
-**Possible state:**
-
-- Task execution never completed
-- No durable `RUNNING` record
-
-**Recovery:**
-
-- Task is treated as `PENDING`
-- Task is retried on restart
-
-**Correctness condition:**
-
-- Safe because task execution did not survive the crash
-
----
-
-### 3. Crash During Task Execution
-
-**What fails:** Scheduler crashes while task is executing
-
-**Possible state:**
-
-- Partial effects may have been applied
-
-**Recovery:**
-
-- Task is retried
-- Task effects must be idempotent
-
----
-
-### 4. Crash After Execution but Before Recording `COMPLETED`
-
-**What fails:** Task finishes execution, but scheduler crashes before persisting `COMPLETED`
-
-**Possible state:**
-
-- Effects may have been applied
-- No durable completion record
-
-**Recovery:**
-
-- Task is retried
-- Idempotency ensures correctness
-
----
-
-### 5. Crash During Disk Write (Partial Write)
-
-**What fails:** System crashes while writing task state to disk
-
-**Possible state:**
-
-- Corrupt or partial data
-
-**Recovery:**
-
-- Partial writes are treated as failures
-- Writes must be atomic (write-then-rename)
-- Task is retried
-
----
-
-## Design Guarantees
-
-- The scheduler does **not** attempt exactly-once execution
-- Correctness is achieved through:
-  - Idempotent task effects
-  - Conservative retry semantics
-  - Atomic persistence
-
----
-
-## Non-Goals
-
-- Distributed execution
-- Task isolation across processes
-- Exactly-once execution guarantees
-- High availability
-
-These are intentionally deferred to later projects (e.g., Workflow Engine).
+The system is correct when task side effects are safe to repeat or externally de-duplicated. This is a standard requirement for at-least-once job execution systems.

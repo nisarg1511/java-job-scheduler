@@ -1,213 +1,108 @@
-# Java Project Structure & Core Interfaces
+# Java Project Structure And Core Interfaces
 
-This document defines the **package structure, core abstractions, and interface contracts** for the Scheduler project.
+This document describes the current package structure and the role of each major abstraction.
 
-The goal is to:
-- Keep the system small and understandable
-- Enforce invariants via structure
-- Make failure handling explicit
-- Avoid premature abstraction
+## Package Layout
 
----
-
-## High-Level Package Structure
-
-```
-scheduler/
-├── core/            # Domain concepts (Task, TaskState)
-├── store/           # Persistence logic (file-based)
-├── scheduler/       # Scheduling & execution loop
-├── recovery/        # Startup recovery logic
-├── util/            # Small utilities (time, IO helpers)
-└── Main.java        # Entry point
+```text
+com.scheduler
+├── api/          # Public submission API
+├── core/         # Domain types and payload contract
+├── payload/      # Example task payloads
+├── recovery/     # Replay-based recovery
+├── scheduler/    # Execution loop and task registry
+├── store/        # Append-only file persistence
+└── App.java      # Demo entry point
 ```
 
-Rules:
-- `core` has **no dependency** on other packages
-- `store` depends on `core`
-- `scheduler` depends on `core` and `store`
-- `recovery` depends on `store`
+## Dependency Direction
 
-This enforces directionality.
+The intended dependency flow is simple:
 
----
+```text
+api       -> core, scheduler, store
+scheduler -> core, recovery, store
+recovery  -> core, store
+store     -> core
+payload   -> core
+```
 
-## Core Domain Model
+`core` should remain small and independent.
 
-### TaskState
+## Core Interfaces And Classes
+
+### `TaskPayload`
+
+```java
+public interface TaskPayload {
+    void execute() throws Exception;
+}
+```
+
+Payloads contain the work a task performs. Because the scheduler provides at-least-once execution, payload effects should be idempotent.
+
+### `TaskState`
 
 ```java
 public enum TaskState {
     PENDING,
-    RUNNING,
     COMPLETED
 }
 ```
 
----
+These are the durable task states in the current implementation.
 
-### Task
-
-```java
-public final class Task {
-    private final String taskId;
-    private final TaskState state;
-    private final TaskPayload payload;
-    private final Instant createdAt;
-
-    // constructor + getters only
-}
-```
-
-Design decisions:
-- `Task` is immutable
-- State changes create a **new Task instance**
-- Prevents accidental in-memory mutation
-
----
-
-### TaskPayload
-
-```java
-public interface TaskPayload {
-    void execute();
-}
-```
-
-Notes:
-- Scheduler treats payload as opaque
-- Payload must be idempotent
-- No return value (effects only)
-
----
-
-## Persistence Layer
-
-### TaskStore
+### `TaskStore`
 
 ```java
 public interface TaskStore {
-    void save(Task task);
-    Task load(String taskId);
-    List<Task> loadAll(TaskState state);
-    void delete(String taskId, TaskState state);
+    void append(TaskRecord record) throws IOException;
+    List<TaskRecord> loadAll() throws IOException;
 }
 ```
 
-Responsibilities:
-- Persist tasks to disk
-- Perform atomic writes
-- Enforce "exactly one directory" invariant
+The store is intentionally minimal: append new state transitions and replay all valid records.
 
----
-
-### FileTaskStore (implementation)
+### `TaskRegistry`
 
 ```java
-public class FileTaskStore implements TaskStore {
-    // root data directory
+public interface TaskRegistry {
+    void register(String taskId, TaskPayload payload);
+    TaskPayload getTask(String taskId);
+    boolean contains(String taskId);
 }
 ```
 
-Notes:
-- Uses write-then-rename
-- No in-place file edits
-- Ignores `.tmp-*` files
+The registry maps task IDs to executable payloads in memory.
 
----
+### `RecoveryManager`
 
-## Scheduler Layer
+Recovery reads all valid records and returns:
 
-### TaskExecutor
+- Pending task IDs.
+- Completed task IDs.
 
-```java
-public interface TaskExecutor {
-    void execute(Task task) throws Exception;
-}
-```
+### `Scheduler`
 
-Notes:
-- Wraps payload execution
-- Allows future instrumentation
-
----
-
-### Scheduler
-
-```java
-public class Scheduler {
-    private final TaskStore taskStore;
-    private final TaskExecutor executor;
-
-    public void runOnce();
-}
-```
-
-Responsibilities:
-- Pick next `PENDING` task
-- Transition state
-- Execute task
-- Persist state transitions
-
-No concurrency yet.
-
----
-
-## Recovery Layer
-
-### RecoveryManager
-
-```java
-public class RecoveryManager {
-    private final TaskStore taskStore;
-
-    public void recover();
-}
-```
-
-Responsibilities:
-- On startup:
-  - Move all `RUNNING` tasks back to `PENDING`
-  - Ignore `COMPLETED`
-
----
+The scheduler coordinates recovery, payload lookup, execution, and completion persistence.
 
 ## Entry Point
 
-### Main
+`App.java` wires the components together for a local demo:
 
-```java
-public class Main {
-    public static void main(String[] args) {
-        // 1. Initialize TaskStore
-        // 2. Run recovery
-        // 3. Start scheduler loop
-    }
-}
-```
+1. Create `FileTaskStore`.
+2. Create `InMemoryTaskRegistry`.
+3. Create `RecoveryManager`.
+4. Create `Scheduler`.
+5. Submit example print tasks.
+6. Run the scheduler once.
 
----
+## Future Structure Changes
 
-## Explicit Non-Goals (for now)
+A production-oriented version would likely add:
 
-- Concurrency
-- Thread pools
-- Task prioritization
-- Retry limits
-- Backoff
-- Observability
-
-These will be added only if needed later.
-
----
-
-## What You Should Implement First
-
-**Implementation order:**
-1. `TaskState`, `Task`, `TaskPayload`
-2. `FileTaskStore`
-3. `RecoveryManager`
-4. `Scheduler.runOnce()`
-
-One layer at a time. No shortcuts.
-
+- A payload serialization package.
+- A retry policy package.
+- A structured logging layer.
+- Tests for store recovery and scheduler behavior.
+- Worker abstractions for parallel execution.
